@@ -110,7 +110,7 @@ if "progress" not in st.session_state:
 # SIDEBAR
 # ============================================================
 
-st.sidebar.title("🎧 Audio Downloader")
+st.sidebar.title("Audio Downloader")
 
 
 # ------------------------------------------------------------
@@ -119,7 +119,7 @@ st.sidebar.title("🎧 Audio Downloader")
 
 if not st.session_state.authenticated:
 
-    st.sidebar.subheader("🔐 CommCare Authentication")
+    st.sidebar.subheader("CommCare Authentication")
 
     commcare_domain = st.sidebar.text_input(
         "CommCare Domain",
@@ -136,7 +136,7 @@ if not st.session_state.authenticated:
     )
 
     verify_key = st.sidebar.button(
-        "🔑 Verify API Key",
+        "Verify API Key",
         type="primary"
     )
 
@@ -170,8 +170,8 @@ if not st.session_state.authenticated:
 
                 # CommCare API endpoint used to test authentication
                 test_url = (
-                    f"https://{commcare_domain}.commcarehq.org/"
-                    "api/v0.5/case/"
+                    f"https://www.commcarehq.org/a/"
+                    f"{commcare_domain}/api/v0.5/case/"
                 )
 
                 response = session.get(
@@ -192,7 +192,7 @@ if not st.session_state.authenticated:
                     st.session_state.session = None
 
                     st.sidebar.error(
-                        "❌ Invalid username or API key."
+                        "Invalid username or API key."
                     )
 
                 elif response.status_code == 403:
@@ -200,7 +200,7 @@ if not st.session_state.authenticated:
                     st.session_state.session = None
 
                     st.sidebar.error(
-                        "❌ Authentication succeeded, "
+                        "Authentication succeeded, "
                         "but you do not have permission."
                     )
 
@@ -209,7 +209,7 @@ if not st.session_state.authenticated:
                     st.session_state.session = None
 
                     st.sidebar.error(
-                        f"❌ Authentication failed. "
+                        f"Authentication failed. "
                         f"HTTP {response.status_code}"
                     )
 
@@ -218,7 +218,7 @@ if not st.session_state.authenticated:
                 st.session_state.session = None
 
                 st.sidebar.error(
-                    f"❌ Connection error: {e}"
+                    f"Connection error: {e}"
                 )
 
 
@@ -240,11 +240,11 @@ else:
     st.sidebar.write("")
 
     st.sidebar.write(
-        f"👤 User: {st.session_state.username}"
+        f"User: {st.session_state.username}"
     )
 
     logout = st.sidebar.button(
-        "🔓 Log out"
+        "Log out"
     )
 
     if logout:
@@ -281,7 +281,7 @@ st.write(
 if not st.session_state.authenticated:
 
     st.info(
-        "🔐 Please enter your CommCare username and API key "
+        "Please enter your CommCare username and API key "
         "in the sidebar to continue."
     )
 
@@ -304,7 +304,7 @@ if uploaded_file is None:
 
     st.info(
         "Upload a file containing the columns "
-        "`audio name` and `survey_audio_1`."
+        "`audio_name` and `survey_audio_link`."
     )
 
     st.stop()
@@ -328,7 +328,7 @@ try:
 
 except Exception as e:
 
-    st.error(f"❌ Could not read the file: {e}")
+    st.error(f"Could not read the file: {e}")
     st.stop()
 
 
@@ -337,8 +337,8 @@ except Exception as e:
 # ============================================================
 
 required_columns = [
-    "audio name",
-    "survey_audio_1"
+    "audio_name",
+    "survey_audio_link"
 ]
 
 missing_columns = [
@@ -349,7 +349,7 @@ missing_columns = [
 if missing_columns:
 
     st.error(
-        "❌ Missing required columns: "
+        "Missing required columns: "
         + ", ".join(missing_columns)
     )
 
@@ -366,15 +366,15 @@ if missing_columns:
 
 df = df[required_columns].copy()
 
-df["audio name"] = (
-    df["audio name"]
+df["audio_name"] = (
+    df["audio_name"]
     .fillna("")
     .astype(str)
     .str.strip()
 )
 
-df["survey_audio_1"] = (
-    df["survey_audio_1"]
+df["survey_audio_link"] = (
+    df["survey_audio_link"]
     .fillna("")
     .astype(str)
     .str.strip()
@@ -383,8 +383,8 @@ df["survey_audio_1"] = (
 
 # Remove rows without audio URL
 df = df[
-    (df["audio name"] != "") &
-    (df["survey_audio_1"] != "")
+    (df["audio_name"] != "") &
+    (df["survey_audio_link"] != "")
 ].copy()
 
 df.reset_index(drop=True, inplace=True)
@@ -394,7 +394,7 @@ df.reset_index(drop=True, inplace=True)
 # SHOW DATA
 # ============================================================
 
-st.subheader("📋 Audio Files")
+st.subheader("Audio Files preview")
 
 st.write(
     f"**{len(df)} audio files** ready for download."
@@ -411,7 +411,7 @@ st.dataframe(
 # DOWNLOAD SETTINGS
 # ============================================================
 
-st.subheader("⚙️ Download Settings")
+st.subheader("Download Settings")
 
 col1, col2 = st.columns(2)
 
@@ -513,8 +513,8 @@ def create_filename_map(dataframe):
     filename_map = []
 
     for name, url in zip(
-        dataframe["audio name"],
-        dataframe["survey_audio_1"]
+        dataframe["audio_name"],
+        dataframe["survey_audio_link"]
     ):
 
         base_name = clean_filename(name)
@@ -662,7 +662,7 @@ def download_audio(
 # ============================================================
 
 start_download = st.button(
-    "🎧 Download & Rename Audio",
+    "Download & Rename Audio",
     type="primary"
 )
 
@@ -711,7 +711,7 @@ if start_download:
             future = executor.submit(
                 download_audio,
                 session,
-                row["survey_audio_1"],
+                row["survey_audio_link"],
                 row["filename"],
                 int(timeout)
             )
@@ -745,7 +745,7 @@ if start_download:
             )
 
             status_text.write(
-                f"⬇️ Downloading... "
+                f"⬇ Downloading... "
                 f"{completed}/{total_files}"
             )
 
@@ -766,8 +766,8 @@ if start_download:
             else:
 
                 failed_files.append({
-                    "audio name": row["audio name"],
-                    "survey_audio_1": row["survey_audio_1"],
+                    "audio_name": row["audio_name"],
+                    "survey_audio_link": row["survey_audio_link"],
                     "filename": row["filename"],
                     "error": result["error"]
                 })
@@ -777,7 +777,7 @@ if start_download:
     # ========================================================
 
     status_text.write(
-        "📦 Creating ZIP file..."
+        "Creating ZIP file..."
     )
 
     with zipfile.ZipFile(
@@ -845,7 +845,7 @@ if st.session_state.download_complete:
 
     results = st.session_state.download_results
 
-    st.subheader("📊 Download Results")
+    st.subheader("Download Results")
 
     col1, col2, col3 = st.columns(3)
 
@@ -875,7 +875,7 @@ if st.session_state.download_complete:
     # DOWNLOAD BUTTONS
     # ========================================================
 
-    st.subheader("📥 Download Results")
+    st.subheader("Download Results")
 
     col1, col2 = st.columns(2)
 
@@ -888,7 +888,7 @@ if st.session_state.download_complete:
         if st.session_state.zip_data is not None:
 
             st.download_button(
-                label="⬇️ Download Audio ZIP",
+                label="Download Audio ZIP",
                 data=st.session_state.zip_data,
                 file_name="commcare_audio_files.zip",
                 mime="application/zip"
@@ -903,7 +903,7 @@ if st.session_state.download_complete:
         if st.session_state.failed_csv is not None:
 
             st.download_button(
-                label="⬇️ Download Failed CSV",
+                label="Download Failed CSV",
                 data=st.session_state.failed_csv,
                 file_name="failed_audio_files.csv",
                 mime="text/csv"
@@ -912,5 +912,5 @@ if st.session_state.download_complete:
         else:
 
             st.success(
-                "🎉 All audio files downloaded successfully!"
+                "All audio files downloaded successfully!"
             )
