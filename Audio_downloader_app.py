@@ -27,6 +27,7 @@ st.set_page_config(
 DOWNLOAD_DIR = "commcare_audio_downloads"
 TEMP_DIR = os.path.join(DOWNLOAD_DIR, "_partial")
 MANIFEST_FILE = os.path.join(DOWNLOAD_DIR, "download_manifest.csv")
+FINAL_ZIP_FILE = os.path.join(DOWNLOAD_DIR, "commcare_audio_files_final.zip")
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 os.makedirs(TEMP_DIR, exist_ok=True)
@@ -82,6 +83,8 @@ defaults = {
     "download_results": None,
     "zip_bytes": None,
     "zip_filename": None,
+    "final_zip_path": None,
+    "final_zip_size": 0,
     "zip_ready": False,
     "final_zip_ready": False,
 }
@@ -288,30 +291,38 @@ def make_manifest_row(filename, audio_name, url, status, size_bytes=0, error="")
 # ZIP FUNCTIONS
 # ============================================================
 
-def create_zip_bytes():
-    """
-    ZIP generation is intentionally NOT called during normal page loading.
-    It is only called when the user presses a Generate ZIP button.
-    """
-    zip_buffer = io.BytesIO()
+def create_final_zip_file():
+    """Create the final ZIP directly on disk for more reliable deployment downloads."""
+    try:
+        if os.path.exists(FINAL_ZIP_FILE):
+            os.remove(FINAL_ZIP_FILE)
+    except OSError as e:
+        raise OSError(f"Could not replace the existing final ZIP: {e}")
 
-    with zipfile.ZipFile(
-        zip_buffer,
-        mode="w",
-        compression=zipfile.ZIP_DEFLATED,
-        compresslevel=1
-    ) as zip_file:
+    completed_files = get_completed_files()
+    if not completed_files:
+        raise ValueError("No completed audio files are available.")
 
-        for filename in get_completed_files():
-            path = file_path(filename)
+    try:
+        with zipfile.ZipFile(FINAL_ZIP_FILE, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as zip_file:
+            for filename in completed_files:
+                path = file_path(filename)
+                try:
+                    zip_file.write(path, arcname=filename)
+                except OSError:
+                    continue
+    except Exception:
+        try:
+            if os.path.exists(FINAL_ZIP_FILE):
+                os.remove(FINAL_ZIP_FILE)
+        except OSError:
+            pass
+        raise
 
-            try:
-                zip_file.write(path, arcname=filename)
-            except OSError:
-                continue
+    if not os.path.exists(FINAL_ZIP_FILE) or os.path.getsize(FINAL_ZIP_FILE) <= 0:
+        raise IOError("The final ZIP was not created or is empty.")
 
-    zip_buffer.seek(0)
-    return zip_buffer.getvalue()
+    return FINAL_ZIP_FILE, os.path.getsize(FINAL_ZIP_FILE)
 
 
 def make_failed_csv(failed_files):
@@ -655,6 +666,9 @@ else:
         st.session_state.failed_csv = None
         st.session_state.download_results = None
         st.session_state.zip_bytes = None
+        st.session_state.zip_filename = None
+        st.session_state.final_zip_path = None
+        st.session_state.final_zip_size = 0
         st.session_state.zip_ready = False
         st.rerun()
 
@@ -1122,38 +1136,51 @@ if completed_files:
     if all_current_files_complete:
         st.success(f"✅ All {len(df):,} files in the current upload are downloaded.")
 
-        if st.button("Create Final ZIP", key="generate_final_zip", type="primary"):
-            with st.spinner(f"Creating final ZIP from {len(completed_files):,} audio files..."):
-                st.session_state.zip_bytes = create_zip_bytes()
+        if st.button("📦 Create Final ZIP", key="generate_final_zip", type="primary"):
+            try:
+                with st.spinner(f"Creating final ZIP from {len(completed_files):,} audio files..."):
+                    zip_path, zip_size = create_final_zip_file()
+                st.session_state.final_zip_path = zip_path
+                st.session_state.final_zip_size = zip_size
                 st.session_state.zip_filename = "commcare_audio_files_final.zip"
                 st.session_state.zip_ready = True
                 st.session_state.final_zip_ready = True
-            st.success("✅ Final ZIP created successfully.")
-
-        if st.session_state.get("final_zip_ready", False) and st.session_state.zip_bytes:
-            st.download_button(
-                label="⬇ Download Final ZIP",
-                data=st.session_state.zip_bytes,
-                file_name="commcare_audio_files_final.zip",
-                mime="application/zip",
-                key="final_zip_download"
-            )
-
-            if st.button("🗑️ Clear Server Audio Files", key="clear_server_audio"):
-                deleted_count, cleanup_errors = delete_saved_audio(reset_manifest=True)
-                st.session_state.zip_bytes = None
-                st.session_state.zip_filename = None
+                st.success(f"✅ Final ZIP created successfully ({zip_size / (1024 * 1024):.1f} MB).")
+            except Exception as e:
+                st.session_state.final_zip_path = None
+                st.session_state.final_zip_size = 0
                 st.session_state.zip_ready = False
                 st.session_state.final_zip_ready = False
-                st.session_state.failed_csv = None
-                st.session_state.download_complete = False
-                st.session_state.download_results = None
+                st.error(f"❌ Could not create the Final ZIP: {e}")
 
-                if cleanup_errors:
-                    st.warning(f"{deleted_count} file(s) removed, but some files could not be deleted: " + "; ".join(cleanup_errors))
-                else:
-                    st.success(f"✅ {deleted_count} server file(s) cleared.")
-                st.rerun()
+        final_zip_path = st.session_state.get("final_zip_path")
+        if st.session_state.get("final_zip_ready", False) and final_zip_path and os.path.exists(final_zip_path) and os.path.getsize(final_zip_path) > 0:
+            try:
+                with open(final_zip_path, "rb") as zip_file:
+                    zip_data = zip_file.read()
+                st.download_button(label="⬇ Download Final ZIP", data=zip_data, file_name="commcare_audio_files_final.zip", mime="application/zip", key="final_zip_download")
+                st.caption(f"Final ZIP size: {os.path.getsize(final_zip_path) / (1024 * 1024):.1f} MB")
+
+                if st.button("🗑️ Clear Server Audio Files", key="clear_server_audio"):
+                    deleted_count, cleanup_errors = delete_saved_audio(reset_manifest=True)
+                    st.session_state.zip_bytes = None
+                    st.session_state.zip_filename = None
+                    st.session_state.final_zip_path = None
+                    st.session_state.final_zip_size = 0
+                    st.session_state.zip_ready = False
+                    st.session_state.final_zip_ready = False
+                    st.session_state.failed_csv = None
+                    st.session_state.download_complete = False
+                    st.session_state.download_results = None
+                    if cleanup_errors:
+                        st.warning(f"{deleted_count} file(s) removed, but some files could not be deleted: " + "; ".join(cleanup_errors))
+                    else:
+                        st.success(f"✅ {deleted_count} server file(s) cleared.")
+                    st.rerun()
+            except OSError as e:
+                st.error(f"❌ The Final ZIP could not be opened for download: {e}")
+        elif st.session_state.get("final_zip_ready", False):
+            st.warning("The Final ZIP is no longer available on the server. Click Create Final ZIP again.")
     else:
         st.info(f"{len(current_pending):,} file(s) from the current upload are still missing. The Final ZIP will be available after all files have been downloaded.")
 else:
