@@ -719,7 +719,7 @@ if not st.session_state.authenticated:
 # FILE UPLOAD
 # ============================================================
 
-st.subheader("Upload Audio file")
+st.subheader("📁 Upload Audio List")
 
 uploaded_file = st.file_uploader(
     "Upload Excel or CSV file",
@@ -1168,22 +1168,35 @@ if completed_files:
         )
 
         # ----------------------------------------------------
-        # CREATE FAST FINAL ZIP
+        # CREATE THE ZIP AUTOMATICALLY BEFORE SHOWING DOWNLOAD
+        #
+        # This is the important fix:
+        # The ZIP is created during the Streamlit run, BEFORE
+        # the Download button is displayed. Therefore the user
+        # only needs to click the actual Download button.
+        # No refresh and no second ZIP-creation click are needed.
         # ----------------------------------------------------
 
-        if st.button(
-            "Create Final ZIP",
-            key="generate_final_zip",
-            type="primary"
-        ):
+        final_zip_path = st.session_state.get("final_zip_path")
+
+        zip_is_available = (
+            st.session_state.get("final_zip_ready", False)
+            and final_zip_path
+            and os.path.exists(final_zip_path)
+            and os.path.getsize(final_zip_path) > 0
+        )
+
+        if not zip_is_available:
 
             try:
+
                 start_time = time.time()
 
                 with st.spinner(
-                    f"Creating fast ZIP from "
+                    f"Preparing ZIP from "
                     f"{len(completed_files):,} audio files..."
                 ):
+
                     zip_path, zip_size = create_final_zip_file()
 
                 elapsed = time.time() - start_time
@@ -1196,10 +1209,11 @@ if completed_files:
                 st.session_state.zip_ready = True
                 st.session_state.final_zip_ready = True
 
+                final_zip_path = zip_path
+
                 st.success(
-                    f"Final ZIP created successfully "
-                    f"({zip_size / (1024 * 1024):.1f} MB) "
-                    f"in {elapsed:.1f} seconds."
+                    f"ZIP ready ({zip_size / (1024 * 1024):.1f} MB) "
+                    f"— created in {elapsed:.1f} seconds."
                 )
 
             except Exception as e:
@@ -1214,7 +1228,10 @@ if completed_files:
                 )
 
         # ----------------------------------------------------
-        # DOWNLOAD FINAL ZIP
+        # NATIVE STREAMLIT DOWNLOAD BUTTON
+        #
+        # The ZIP already exists before this button is rendered.
+        # Clicking this button immediately starts the download.
         # ----------------------------------------------------
 
         final_zip_path = st.session_state.get("final_zip_path")
@@ -1227,22 +1244,30 @@ if completed_files:
         ):
 
             try:
-                with open(final_zip_path, "rb") as zip_file:
 
-                    st.download_button(
-                        label="⬇ Download Final ZIP",
-                        data=zip_file,
-                        file_name="commcare_audio_files_final.zip",
-                        mime="application/zip",
-                        key="final_zip_download"
-                    )
+                zip_size_mb = (
+                    os.path.getsize(final_zip_path)
+                    / (1024 * 1024)
+                )
+
+                with open(final_zip_path, "rb") as zip_file:
+                    zip_data = zip_file.read()
+
+                st.download_button(
+                    label="⬇ Download Final ZIP",
+                    data=zip_data,
+                    file_name="commcare_audio_files_final.zip",
+                    mime="application/zip",
+                    key="final_zip_download",
+                    type="primary"
+                )
 
                 st.caption(
-                    f"Final ZIP size: "
-                    f"{os.path.getsize(final_zip_path) / (1024 * 1024):.1f} MB"
+                    f"Final ZIP size: {zip_size_mb:.1f} MB"
                 )
 
             except OSError as e:
+
                 st.error(
                     f"The Final ZIP could not be opened for download: {e}"
                 )
@@ -1273,12 +1298,15 @@ if completed_files:
                 st.session_state.download_results = None
 
                 if cleanup_errors:
+
                     st.warning(
                         f"{deleted_count} file(s) removed, "
                         f"but some files could not be deleted: "
                         + "; ".join(cleanup_errors)
                     )
+
                 else:
+
                     st.success(
                         f"{deleted_count} server file(s) cleared."
                     )
