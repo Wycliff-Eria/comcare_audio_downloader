@@ -1149,7 +1149,7 @@ else:
 
     st.sidebar.divider()
 
-    st.sidebar.subheader("⚙️ Download Settings")
+    st.sidebar.subheader("Download Settings")
 
     timeout = st.sidebar.number_input(
         "Timeout per file (seconds)",
@@ -1424,31 +1424,7 @@ if df is not None and tasks:
 
     # --------------------------------------------------------
 
-    with st.expander("📌 How the files will be renamed"):
-
-        st.code(
-
-            """
-
-audio_name = household_001
-
-survey_link1 -> household_001_1.m4a
-
-link2        -> household_001_2.m4a
-
-link3        -> household_001_3.m4a
-
-audio_name = household_002
-
-survey_link1 -> household_002_1.m4a
-
-link2        -> household_002_2.m4a
-
-link3        -> missing -> skipped
-
-            """
-
-        )
+    
 
     # --------------------------------------------------------
 
