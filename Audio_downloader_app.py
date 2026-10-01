@@ -1,591 +1,987 @@
 import streamlit as st
+
 import pandas as pd
+
 import requests
+
 import io
-import threading
+
 import zipfile
+
 import re
+
 import os
+
 import time
+
+from urllib.parse import urlparse
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-
 # ============================================================
+
 # PAGE CONFIG
+
 # ============================================================
 
 st.set_page_config(
+
     page_title="CommCare Audio Downloader",
+
+    page_icon="🎧",
+
     layout="wide"
+
 )
 
-
 # ============================================================
-# SETTINGS
-# ============================================================
-
-DOWNLOAD_DIR = "commcare_audio_downloads"
-TEMP_DIR = os.path.join(DOWNLOAD_DIR, "_partial")
-MANIFEST_FILE = os.path.join(DOWNLOAD_DIR, "download_manifest.csv")
-FINAL_ZIP_FILE = os.path.join(DOWNLOAD_DIR, "commcare_audio_files_final.zip")
-
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-os.makedirs(TEMP_DIR, exist_ok=True)
-
-manifest_lock = threading.Lock()
-
 
 # ============================================================
 # CUSTOM CSS
 # ============================================================
 
-st.markdown("""
-<style>
-div[data-testid="stButton"] > button,
-div[data-testid="stDownloadButton"] > button {
-    background-color: #0066CC;
-    color: white;
-    border: none;
-    border-radius: 3px;
-    padding: 6px 16px;
-    font-size: 14px;
-    font-weight: 600;
+st.markdown(
+    """
+    <style>
+
+    /* Consistent Streamlit layout */
+    .main-title {
+        font-size: 38px;
+        font-weight: 700;
+        margin-bottom: 5px;
+        line-height: 1.2;
+    }
+
+    .subtitle {
+        color: #666666;
+        font-size: 17px;
+        margin-bottom: 25px;
+        line-height: 1.5;
+    }
+
+    /* Metric cards */
+    div[data-testid="stMetric"] {
+        background-color: #ffffff;
+        border: 1px solid #dddddd;
+        border-radius: 10px;
+        padding: 15px;
+    }
+
+    /* Compact buttons - applies to all action/download buttons */
+    div[data-testid="stButton"] > button,
+    div[data-testid="stDownloadButton"] > button {
+        background-color: #0066CC;
+        color: #ffffff;
+        border: none;
+        border-radius: 4px;
+        padding: 4px 10px !important;
+        min-height: 32px !important;
+        height: 32px !important;
+        width: auto !important;
+        min-width: 0 !important;
+        font-size: 12px !important;
+        font-weight: 600;
+        line-height: 1.2 !important;
+        white-space: nowrap;
+    }
+
+    div[data-testid="stButton"] > button:hover,
+    div[data-testid="stDownloadButton"] > button:hover {
+        background-color: #004C99;
+        color: #ffffff;
+    }
+
+    /* Keep button containers compact even when use_container_width=True */
+    div[data-testid="stButton"],
+    div[data-testid="stDownloadButton"] {
+        width: fit-content !important;
+    }
+
+    /* Compact buttons inside the sidebar too */
+    section[data-testid="stSidebar"] div[data-testid="stButton"] > button,
+    section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] > button {
+        padding: 3px 9px !important;
+        min-height: 30px !important;
+        height: 30px !important;
+        font-size: 12px !important;
+    }
+
+    .auth-success {
+        padding: 10px;
+        border-radius: 3px;
+        background-color: #e8f5e9;
+        color: #1b5e20;
+        font-weight: 600;
+    }
+
+    .success-box {
+        padding: 15px;
+        border-radius: 10px;
+        background-color: #e8f5e9;
+        border: 1px solid #81c784;
+        margin-bottom: 15px;
+    }
+
+    .warning-box {
+        padding: 15px;
+        border-radius: 10px;
+        background-color: #fff8e1;
+        border: 1px solid #ffcc80;
+        margin-bottom: 15px;
+    }
+
+    .error-box {
+        padding: 15px;
+        border-radius: 10px;
+        background-color: #ffebee;
+        border: 1px solid #ef9a9a;
+        margin-bottom: 15px;
+    }
+
+    /* Compact buttons throughout the app */
+    div[data-testid="stButton"] > button,
+    div[data-testid="stDownloadButton"] > button {
+        padding: 4px 10px !important;
+        min-height: 32px !important;
+        height: 32px !important;
+        width: auto !important;
+        min-width: 0 !important;
+        font-size: 12px !important;
+        line-height: 1.2 !important;
+        white-space: nowrap;
+    }
+
+    div[data-testid="stButton"],
+    div[data-testid="stDownloadButton"] {
+        width: fit-content !important;
+    }
+
+    section[data-testid="stSidebar"] div[data-testid="stButton"] > button,
+    section[data-testid="stSidebar"] div[data-testid="stDownloadButton"] > button {
+        padding: 3px 9px !important;
+        min-height: 30px !important;
+        height: 30px !important;
+        font-size: 12px !important;
+    }
+
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+# ============================================================
+# CONSTANTS
+
+# ============================================================
+
+AUDIO_NAME_COLUMN = "audio_name"
+
+LINK_COLUMNS = [
+
+    "audio_link1",
+
+    "audio_link2",
+
+    "audio_link3"
+
+]
+
+CHUNK_SIZE = 1024 * 1024  # 1 MB
+
+RETRY_STATUS_CODES = {
+
+    408, 429, 500, 502, 503, 504
+
 }
 
-div[data-testid="stButton"] > button:hover,
-div[data-testid="stDownloadButton"] > button:hover {
-    background-color: #004C99;
-    color: white;
-}
+USER_AGENT = "CommCare-Audio-Downloader/2.0"
 
-.auth-success {
-    padding: 10px;
-    border-radius: 3px;
-    background-color: #e8f5e9;
-    color: #1b5e20;
-    font-weight: 600;
-}
-</style>
-""", unsafe_allow_html=True)
+# ============================================================
 
+# CUSTOM CSS
+
+# ============================================================
+
+st.markdown(
+
+    """
+
+    <style>
+
+    .main-title {
+
+        font-size: 38px;
+
+        font-weight: 700;
+
+        margin-bottom: 5px;
+
+    }
+
+    .subtitle {
+
+        color: #666;
+
+        font-size: 17px;
+
+        margin-bottom: 25px;
+
+    }
+
+    .success-box {
+
+        padding: 15px;
+
+        border-radius: 10px;
+
+        background-color: #e8f5e9;
+
+        border: 1px solid #81c784;
+
+        margin-bottom: 15px;
+
+    }
+
+    .warning-box {
+
+        padding: 15px;
+
+        border-radius: 10px;
+
+        background-color: #fff8e1;
+
+        border: 1px solid #ffcc80;
+
+        margin-bottom: 15px;
+
+    }
+
+    .error-box {
+
+        padding: 15px;
+
+        border-radius: 10px;
+
+        background-color: #ffebee;
+
+        border: 1px solid #ef9a9a;
+
+        margin-bottom: 15px;
+
+    }
+
+    </style>
+
+    """,
+
+    unsafe_allow_html=True
+
+)
+
+# ============================================================
 
 # ============================================================
 # SESSION STATE
 # ============================================================
 
-defaults = {
+SESSION_DEFAULTS = {
     "authenticated": False,
+    "commcare_domain": "",
+    "username": "",
+    "api_key": "",
     "session_headers": None,
-    "username": None,
-    "commcare_domain": "m-e-uganda",
-    "download_complete": False,
-    "failed_csv": None,
-    "download_results": None,
-    "zip_bytes": None,
-    "zip_filename": None,
-    "final_zip_path": None,
-    "final_zip_size": 0,
-    "zip_ready": False,
-    "final_zip_ready": False,
+    "completed_files": {},
+    "failed_downloads": [],
+    "download_started": False,
+    "processed_count": 0,
+    "total_audio_count": 0,
 }
 
-for key, value in defaults.items():
-    if key not in st.session_state:
-        st.session_state[key] = value
+for _key, _default in SESSION_DEFAULTS.items():
+    if _key not in st.session_state:
+        st.session_state[_key] = _default
 
 
-# ============================================================
-# CONSTANTS
-# ============================================================
-
-MANIFEST_COLUMNS = [
-    "filename",
-    "audio_name",
-    "survey_audio_link",
-    "status",
-    "size_bytes",
-    "downloaded_at",
-    "error",
-]
-
+# HELPER FUNCTIONS
 
 # ============================================================
-# FAST / SMALL HELPER FUNCTIONS
-# ============================================================
 
-def clean_filename(name):
-    name = str(name).strip()
-    name = re.sub(r'[<>:"/\\|?*]', "_", name)
-    name = re.sub(r"[\x00-\x1f]", "", name)
-    name = name.rstrip(". ")
-    return name or "audio"
+def clean_filename(filename):
 
+    """
 
-def get_extension(url):
-    clean_url = str(url).lower().split("?")[0]
+    Remove characters that are unsafe in filenames.
 
-    for ext in [".m4a", ".mp3", ".wav", ".aac", ".ogg", ".amr"]:
-        if clean_url.endswith(ext):
-            return ext
+    """
+
+    filename = str(filename).strip()
+
+    if not filename:
+
+        filename = "audio"
+
+    filename = re.sub(r'[<>:"/\\\\|?*\x00-\x1F]', "_", filename)
+
+    filename = re.sub(r"\s+", " ", filename)
+
+    filename = filename.rstrip(". ")
+
+    return filename[:180]
+
+def get_extension_from_url(url):
+
+    """
+
+    Try to determine the audio extension from the URL.
+
+    """
+
+    try:
+
+        path = urlparse(url).path.lower()
+
+        extensions = [
+
+            ".m4a",
+
+            ".mp3",
+
+            ".wav",
+
+            ".aac",
+
+            ".ogg",
+
+            ".amr",
+
+            ".3gp",
+
+            ".webm"
+
+        ]
+
+        for ext in extensions:
+
+            if path.endswith(ext):
+
+                return ext
+
+    except Exception:
+
+        pass
 
     return ".m4a"
 
+def make_unique_filename(filename, existing_names):
 
-def create_filename_map(dataframe):
-    """Vector-independent, fast enough for normal upload sizes."""
-    used_names = {}
-    filenames = []
-
-    for name, url in zip(
-        dataframe["audio_name"].tolist(),
-        dataframe["survey_audio_link"].tolist()
-    ):
-        base_name = clean_filename(name)
-        extension = get_extension(url)
-
-        filename = base_name + extension
-        key = filename.lower()
-
-        if key not in used_names:
-            used_names[key] = 0
-        else:
-            used_names[key] += 1
-            filename = f"{base_name}_{used_names[key]}{extension}"
-
-        filenames.append(filename)
-
-    return filenames
-
-
-def file_path(filename):
-    return os.path.join(DOWNLOAD_DIR, filename)
-
-
-def partial_file_path(filename):
-    return os.path.join(TEMP_DIR, filename + ".part")
-
-
-def get_existing_files():
     """
-    Build the existing-file set once instead of calling os.path.isfile()
-    repeatedly for every row and every Streamlit rerun.
+
+    Make sure duplicate filenames are unique.
+
     """
-    try:
-        return {
-            name
-            for name in os.listdir(DOWNLOAD_DIR)
-            if os.path.isfile(os.path.join(DOWNLOAD_DIR, name))
-            and not name.endswith(".zip")
-            and name != os.path.basename(MANIFEST_FILE)
-        }
-    except OSError:
-        return set()
 
+    if filename not in existing_names:
 
-def get_completed_files():
-    existing = get_existing_files()
-    completed = []
+        return filename
 
-    for filename in existing:
-        try:
-            if os.path.getsize(file_path(filename)) > 0:
-                completed.append(filename)
-        except OSError:
-            pass
+    base, ext = os.path.splitext(filename)
 
-    return sorted(completed)
+    counter = 1
 
+    while f"{base}_{counter}{ext}" in existing_names:
 
-# ============================================================
-# MANIFEST
-# ============================================================
+        counter += 1
 
-@st.cache_data(ttl=10, show_spinner=False)
-def load_manifest_cached(manifest_path, modified_time):
-    if not os.path.exists(manifest_path):
-        return pd.DataFrame(columns=MANIFEST_COLUMNS)
+    return f"{base}_{counter}{ext}"
 
-    try:
-        manifest = pd.read_csv(manifest_path)
+def rename_first_four_columns(df):
 
-        for col in MANIFEST_COLUMNS:
-            if col not in manifest.columns:
-                manifest[col] = ""
-
-        return manifest[MANIFEST_COLUMNS]
-
-    except Exception:
-        return pd.DataFrame(columns=MANIFEST_COLUMNS)
-
-
-def load_manifest():
-    try:
-        mtime = os.path.getmtime(MANIFEST_FILE)
-    except OSError:
-        mtime = 0
-
-    return load_manifest_cached(MANIFEST_FILE, mtime)
-
-
-def append_manifest_rows(rows):
     """
-    Write the manifest ONCE after a download batch.
 
-    The old code read and rewrote the whole CSV for every audio file.
-    With hundreds/thousands of files that caused a major slowdown.
+    Rename the first four columns:
+
+    1st column -> audio_name
+
+    2nd column -> audio_link1
+
+    3rd column -> audio_link2
+
+    4th column -> audio_link3
+
+    Any additional columns are preserved.
+
     """
-    if not rows:
-        return
 
-    with manifest_lock:
-        try:
-            existing = load_manifest().copy()
-        except Exception:
-            existing = pd.DataFrame(columns=MANIFEST_COLUMNS)
+    df = df.copy()
 
-        new_df = pd.DataFrame(rows, columns=MANIFEST_COLUMNS)
+    if len(df.columns) < 2:
 
-        if not existing.empty:
-            keys = set(
-                zip(
-                    existing["filename"].astype(str),
-                    existing["survey_audio_link"].astype(str)
-                )
-            )
+        raise ValueError(
 
-            new_df = new_df[
-                ~new_df.apply(
-                    lambda r: (
-                        str(r["filename"]),
-                        str(r["survey_audio_link"])
-                    ) in keys,
-                    axis=1
-                )
-            ]
+            "The uploaded file must contain at least "
 
-        combined = pd.concat(
-            [existing, new_df],
-            ignore_index=True
+            "an audio name column and one audio link column."
+
         )
 
-        temp_manifest = MANIFEST_FILE + ".tmp"
-        combined.to_csv(temp_manifest, index=False)
-        os.replace(temp_manifest, MANIFEST_FILE)
+    new_names = [
 
-        load_manifest_cached.clear()
+        "audio_name",
 
+        "audio_link1",
 
-def make_manifest_row(filename, audio_name, url, status, size_bytes=0, error=""):
-    return {
-        "filename": filename,
-        "audio_name": audio_name,
-        "survey_audio_link": url,
-        "status": status,
-        "size_bytes": size_bytes,
-        "downloaded_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "error": error,
-    }
+        "audio_link2",
 
+        "audio_link3"
 
-# ============================================================
-# ZIP FUNCTIONS
-# ============================================================
+    ]
 
-def create_final_zip_file():
+    columns = list(df.columns)
+
+    for i in range(min(4, len(columns))):
+
+        columns[i] = new_names[i]
+
+    df.columns = columns
+
+    return df
+
+def load_uploaded_file(uploaded_file):
+
     """
-    Create the final ZIP as fast as possible.
 
-    Audio files are already compressed, so ZIP_STORED avoids
-    CPU-intensive compression and makes ZIP creation much faster.
+    Load Excel or CSV file.
+
     """
-    if os.path.exists(FINAL_ZIP_FILE):
+
+    filename = uploaded_file.name.lower()
+
+    if filename.endswith(".csv"):
+
+        df = pd.read_csv(uploaded_file)
+
+    elif filename.endswith(".xlsx"):
+
+        df = pd.read_excel(uploaded_file, engine="openpyxl")
+
+    elif filename.endswith(".xls"):
+
         try:
-            os.remove(FINAL_ZIP_FILE)
-        except OSError as e:
-            raise OSError(
-                f"Could not replace the existing final ZIP: {e}"
+
+            df = pd.read_excel(uploaded_file, engine="xlrd")
+
+        except ImportError:
+
+            raise ValueError(
+
+                "Reading .xls files requires xlrd. "
+
+                "Install it using: pip install xlrd"
+
             )
 
-    completed_files = get_completed_files()
+    else:
 
-    if not completed_files:
-        raise ValueError("No completed audio files are available.")
+        raise ValueError(
 
-    try:
-        # ZIP_STORED = NO COMPRESSION.
-        # This is much faster for MP3, M4A, WAV, AAC and OGG files.
-        with zipfile.ZipFile(
-            FINAL_ZIP_FILE,
-            mode="w",
-            compression=zipfile.ZIP_STORED
-        ) as zip_file:
+            "Unsupported file type. Please upload CSV, XLSX or XLS."
 
-            for filename in completed_files:
-                path = file_path(filename)
+        )
 
-                if not os.path.isfile(path):
-                    continue
+    return rename_first_four_columns(df)
 
-                try:
-                    zip_file.write(path, arcname=filename)
-                except OSError:
-                    continue
+def clean_url(value):
 
-    except Exception:
-        try:
-            if os.path.exists(FINAL_ZIP_FILE):
-                os.remove(FINAL_ZIP_FILE)
-        except OSError:
-            pass
-        raise
+    """
 
-    if (
-        not os.path.exists(FINAL_ZIP_FILE)
-        or os.path.getsize(FINAL_ZIP_FILE) <= 0
-    ):
-        raise IOError("The final ZIP was not created or is empty.")
+    Clean and validate an audio URL.
 
-    return FINAL_ZIP_FILE, os.path.getsize(FINAL_ZIP_FILE)
+    """
 
-def make_failed_csv(failed_files):
-    if not failed_files:
+    if pd.isna(value):
+
         return None
 
-    return pd.DataFrame(failed_files).to_csv(
-        index=False
-    ).encode("utf-8")
+    value = str(value).strip()
 
+    if not value:
 
-# ============================================================
-# DELETE SAVED AUDIO
-# ============================================================
+        return None
 
-def delete_saved_audio(reset_manifest=True):
-    deleted = 0
-    errors = []
+    if value.lower() in ["nan", "none", "null", "---"]:
 
-    # Completed audio
-    for filename in os.listdir(DOWNLOAD_DIR):
-        path = os.path.join(DOWNLOAD_DIR, filename)
+        return None
 
-        if not os.path.isfile(path):
+    if not value.startswith(("http://", "https://")):
+
+        return None
+
+    return value
+
+def count_audio_links(df):
+
+    """
+
+    Count all non-empty audio links.
+
+    """
+
+    count = 0
+
+    for column in LINK_COLUMNS:
+
+        if column not in df.columns:
+
             continue
 
-        if filename == os.path.basename(MANIFEST_FILE):
-            continue
+        for value in df[column]:
 
-        if filename.endswith(".zip"):
-            continue
+            if clean_url(value):
 
-        try:
-            os.remove(path)
-            deleted += 1
-        except OSError as e:
-            errors.append(f"{filename}: {e}")
+                count += 1
 
-    # Partial files
-    if os.path.isdir(TEMP_DIR):
-        for filename in os.listdir(TEMP_DIR):
-            path = os.path.join(TEMP_DIR, filename)
+    return count
 
-            if not os.path.isfile(path):
+def build_audio_tasks(df):
+
+    """
+
+    Convert the DataFrame into individual audio download tasks.
+
+    One row can produce:
+
+        name + link1
+
+        name + link2
+
+        name + link3
+
+    """
+
+    tasks = []
+
+    for row_number, row in df.iterrows():
+
+        audio_name = row.get(AUDIO_NAME_COLUMN)
+
+        if pd.isna(audio_name):
+
+            audio_name = f"audio_{row_number + 1}"
+
+        audio_name = clean_filename(audio_name)
+
+        link_number = 0
+
+        for link_column in LINK_COLUMNS:
+
+            if link_column not in df.columns:
+
                 continue
 
-            try:
-                os.remove(path)
-                deleted += 1
-            except OSError as e:
-                errors.append(f"_partial/{filename}: {e}")
+            url = clean_url(row.get(link_column))
 
-    if reset_manifest:
-        try:
-            empty_manifest = pd.DataFrame(columns=MANIFEST_COLUMNS)
-            temp_manifest = MANIFEST_FILE + ".tmp"
-            empty_manifest.to_csv(temp_manifest, index=False)
-            os.replace(temp_manifest, MANIFEST_FILE)
-            load_manifest_cached.clear()
-        except OSError as e:
-            errors.append(f"download_manifest.csv: {e}")
+            if not url:
 
-    return deleted, errors
+                continue
 
+            link_number += 1
+
+            extension = get_extension_from_url(url)
+
+            filename = (
+
+                f"{audio_name}_{link_number}{extension}"
+
+            )
+
+            tasks.append(
+
+                {
+
+                    "row_number": row_number + 2,
+
+                    "audio_name": audio_name,
+
+                    "link_column": link_column,
+
+                    "url": url,
+
+                    "filename": filename
+
+                }
+
+            )
+
+    return tasks
 
 # ============================================================
-# DOWNLOAD ONE AUDIO
+
+# DOWNLOAD FUNCTION
+
 # ============================================================
 
 def download_audio(
-    headers,
-    url,
-    filename,
-    audio_name,
+
+    task,
+
+    username,
+
+    api_key,
+
     timeout,
-    existing_files
+
+    retries
+
 ):
-    """
-    Download one audio file.
 
-    Important performance changes:
-    - Existing files are checked using an in-memory set.
-    - Manifest is NOT rewritten by each worker.
-    - A fresh requests.Session is used per worker call.
-    - Files are written directly to disk.
-    - .part files protect incomplete downloads.
     """
 
-    final_path = file_path(filename)
-    temp_path = partial_file_path(filename)
+    Download one CommCare audio file.
 
-    # Fast existing-file check
-    if filename in existing_files:
-        try:
-            size = os.path.getsize(final_path)
-        except OSError:
-            size = 0
+    Returns:
 
-        return {
-            "success": True,
-            "skipped": True,
-            "filename": filename,
-            "audio_name": audio_name,
-            "url": url,
-            "error": "",
-            "size_bytes": size,
+        {
+
+            success: True/False,
+
+            filename: ...,
+
+            content: bytes,
+
+            error: ...
+
         }
 
-    max_retries = 3
+    """
 
-    for attempt in range(max_retries):
-        try:
-            if os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except OSError:
-                    pass
+    url = task["url"]
 
-            # Each worker gets its own session.
-            # This avoids sharing one requests.Session between threads.
-            session = requests.Session()
-            session.headers.update(headers)
+    filename = task["filename"]
 
-            with session.get(
-                url,
-                stream=True,
-                timeout=timeout
-            ) as response:
+    headers = {
 
-                if response.status_code == 401:
-                    return {
-                        "success": False,
-                        "skipped": False,
-                        "filename": filename,
-                        "audio_name": audio_name,
-                        "url": url,
-                        "error": "HTTP 401 - Unauthorized",
-                        "size_bytes": 0,
-                    }
+        "Authorization": f"ApiKey {username}:{api_key}",
 
-                if response.status_code == 403:
-                    return {
-                        "success": False,
-                        "skipped": False,
-                        "filename": filename,
-                        "audio_name": audio_name,
-                        "url": url,
-                        "error": "HTTP 403 - Permission denied",
-                        "size_bytes": 0,
-                    }
+        "User-Agent": USER_AGENT
 
-                if response.status_code != 200:
-                    retryable = response.status_code in [
-                        408, 429, 500, 502, 503, 504
-                    ]
-
-                    if retryable and attempt < max_retries - 1:
-                        time.sleep(2 ** attempt)
-                        continue
-
-                    return {
-                        "success": False,
-                        "skipped": False,
-                        "filename": filename,
-                        "audio_name": audio_name,
-                        "url": url,
-                        "error": f"HTTP {response.status_code}",
-                        "size_bytes": 0,
-                    }
-
-                total_bytes = 0
-
-                with open(temp_path, "wb") as audio_file:
-                    for chunk in response.iter_content(
-                        chunk_size=1024 * 1024
-                    ):
-                        if chunk:
-                            audio_file.write(chunk)
-                            total_bytes += len(chunk)
-
-            if total_bytes <= 0:
-                raise IOError(
-                    "The server returned an empty audio file."
-                )
-
-            # Atomic completion
-            os.replace(temp_path, final_path)
-
-            return {
-                "success": True,
-                "skipped": False,
-                "filename": filename,
-                "audio_name": audio_name,
-                "url": url,
-                "error": "",
-                "size_bytes": total_bytes,
-            }
-
-        except requests.exceptions.RequestException as e:
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
-                continue
-
-            return {
-                "success": False,
-                "skipped": False,
-                "filename": filename,
-                "audio_name": audio_name,
-                "url": url,
-                "error": str(e),
-                "size_bytes": 0,
-            }
-
-        except Exception as e:
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
-                continue
-
-            return {
-                "success": False,
-                "skipped": False,
-                "filename": filename,
-                "audio_name": audio_name,
-                "url": url,
-                "error": str(e),
-                "size_bytes": 0,
-            }
-
-    return {
-        "success": False,
-        "skipped": False,
-        "filename": filename,
-        "audio_name": audio_name,
-        "url": url,
-        "error": "Unknown download error",
-        "size_bytes": 0,
     }
 
+    last_error = "Unknown error"
+
+    for attempt in range(1, retries + 1):
+
+        try:
+
+            response = requests.get(
+
+                url,
+
+                headers=headers,
+
+                stream=True,
+
+                timeout=timeout
+
+            )
+
+            # ------------------------------------------------
+
+            # AUTHENTICATION ERROR
+
+            # ------------------------------------------------
+
+            if response.status_code == 401:
+
+                return {
+
+                    "success": False,
+
+                    "filename": filename,
+
+                    "content": None,
+
+                    "error": "401 Unauthorized - check CommCare username/API key."
+
+                }
+
+            if response.status_code == 403:
+
+                return {
+
+                    "success": False,
+
+                    "filename": filename,
+
+                    "content": None,
+
+                    "error": "403 Forbidden - API key may not have access to this recording."
+
+                }
+
+            # ------------------------------------------------
+
+            # SUCCESS
+
+            # ------------------------------------------------
+
+            if response.status_code == 200:
+
+                file_buffer = io.BytesIO()
+
+                for chunk in response.iter_content(
+
+                    chunk_size=CHUNK_SIZE
+
+                ):
+
+                    if chunk:
+
+                        file_buffer.write(chunk)
+
+                response.close()
+
+                return {
+
+                    "success": True,
+
+                    "filename": filename,
+
+                    "content": file_buffer.getvalue(),
+
+                    "error": None
+
+                }
+
+            # ------------------------------------------------
+
+            # RETRYABLE HTTP ERRORS
+
+            # ------------------------------------------------
+
+            if response.status_code in RETRY_STATUS_CODES:
+
+                last_error = (
+
+                    f"HTTP {response.status_code}"
+
+                )
+
+                response.close()
+
+                if attempt < retries:
+
+                    time.sleep(min(2 ** attempt, 10))
+
+                    continue
+
+                return {
+
+                    "success": False,
+
+                    "filename": filename,
+
+                    "content": None,
+
+                    "error": last_error
+
+                }
+
+            # ------------------------------------------------
+
+            # OTHER HTTP ERRORS
+
+            # ------------------------------------------------
+
+            last_error = (
+
+                f"HTTP {response.status_code}: "
+
+                f"{response.reason}"
+
+            )
+
+            response.close()
+
+            return {
+
+                "success": False,
+
+                "filename": filename,
+
+                "content": None,
+
+                "error": last_error
+
+            }
+
+        except requests.exceptions.Timeout:
+
+            last_error = "Request timed out."
+
+            if attempt < retries:
+
+                time.sleep(min(2 ** attempt, 10))
+
+                continue
+
+        except requests.exceptions.ConnectionError:
+
+            last_error = (
+
+                "Connection interrupted or network unavailable."
+
+            )
+
+            if attempt < retries:
+
+                time.sleep(min(2 ** attempt, 10))
+
+                continue
+
+        except requests.exceptions.RequestException as e:
+
+            last_error = str(e)
+
+            if attempt < retries:
+
+                time.sleep(min(2 ** attempt, 10))
+
+                continue
+
+        except Exception as e:
+
+            last_error = str(e)
+
+            break
+
+    return {
+
+        "success": False,
+
+        "filename": filename,
+
+        "content": None,
+
+        "error": last_error
+
+    }
 
 # ============================================================
-# SIDEBAR / AUTHENTICATION
+
+# CREATE ZIP
+
+# ============================================================
+
+def create_zip_from_completed_files():
+
+    """
+
+    Create a ZIP containing all successfully downloaded files.
+
+    """
+
+    if not st.session_state.completed_files:
+
+        return None
+
+    zip_buffer = io.BytesIO()
+
+    with zipfile.ZipFile(
+
+        zip_buffer,
+
+        mode="w",
+
+        compression=zipfile.ZIP_STORED
+
+    ) as zip_file:
+
+        for filename, content in (
+
+            st.session_state.completed_files.items()
+
+        ):
+
+            zip_file.writestr(
+
+                filename,
+
+                content
+
+            )
+
+    zip_buffer.seek(0)
+
+    return zip_buffer.getvalue()
+
+# ============================================================
+
+# FAILED CSV
+
+# ============================================================
+
+def create_failed_csv():
+
+    """
+
+    Create CSV containing failed downloads.
+
+    """
+
+    if not st.session_state.failed_downloads:
+
+        return None
+
+    failed_df = pd.DataFrame(
+
+        st.session_state.failed_downloads
+
+    )
+
+    return failed_df.to_csv(
+
+        index=False
+
+    ).encode("utf-8")
+
+# ============================================================
+
+# TITLE
+
+# ============================================================
+
+st.markdown(
+
+    '<div class="main-title">🎧 CommCare Audio Downloader</div>',
+
+    unsafe_allow_html=True
+
+)
+
+st.markdown(
+
+    """
+
+    <div class="subtitle">
+
+    Upload your audio list, download CommCare recordings,
+
+    rename them automatically, and package completed files
+
+    into a ZIP.
+
+    </div>
+
+    """,
+
+    unsafe_allow_html=True
+
+)
+
+# ============================================================
+
+# SIDEBAR
+
 # ============================================================
 
 st.sidebar.title("Audio Downloader")
@@ -596,764 +992,940 @@ if not st.session_state.authenticated:
 
     commcare_domain = st.sidebar.text_input(
         "CommCare Domain",
-        value=st.session_state.commcare_domain
-    )
+        value=st.session_state.commcare_domain,
+        key="commcare_domain_input"
+    ).strip()
 
     username = st.sidebar.text_input(
-        "CommCare Username"
-    )
+        "CommCare Username",
+        value=st.session_state.username,
+        key="username_input"
+    ).strip()
 
     api_key = st.sidebar.text_input(
         "CommCare API Key",
-        type="password"
-    )
+        value=st.session_state.api_key,
+        type="password",
+        key="api_key_input"
+    ).strip()
 
     verify_key = st.sidebar.button(
+
         "Verify API Key",
+
         type="primary"
+
     )
 
     if verify_key:
 
-        if not username or not api_key:
-            st.sidebar.error(
-                "Please enter your username and API key."
-            )
+        if not commcare_domain:
+            st.sidebar.error("Please enter your CommCare domain.")
+
+        elif not username or not api_key:
+            st.sidebar.error("Please enter your username and API key.")
 
         else:
             headers = {
+
                 "Authorization": f"ApiKey {username}:{api_key}",
+
                 "User-Agent": "CommCare-Audio-Downloader/3.0",
+
                 "Accept": "*/*",
+
             }
 
             test_url = (
+
                 f"https://www.commcarehq.org/a/"
+
                 f"{commcare_domain}/api/v0.5/case/"
+
             )
 
             try:
+
                 response = requests.get(
+
                     test_url,
+
                     headers=headers,
+
                     params={"limit": 1},
+
                     timeout=20
+
                 )
 
                 if response.status_code == 200:
+
                     st.session_state.authenticated = True
+
                     st.session_state.username = username
+                    st.session_state.api_key = api_key
                     st.session_state.commcare_domain = commcare_domain
                     st.session_state.session_headers = headers
+
                     st.rerun()
 
                 elif response.status_code == 401:
+
                     st.sidebar.error(
+
                         "Invalid username or API key."
+
                     )
 
                 elif response.status_code == 403:
+
                     st.sidebar.error(
+
                         "Authentication succeeded, but you do not have permission."
+
                     )
 
                 else:
+
                     st.sidebar.error(
+
                         f"Authentication failed. HTTP {response.status_code}"
+
                     )
 
             except requests.exceptions.RequestException as e:
+
                 st.sidebar.error(f"Connection error: {e}")
 
 else:
 
     st.sidebar.markdown(
+
         """
+
         <div class="auth-success">
+
         ✅ CommCare authenticated
+
         </div>
+
         """,
+
         unsafe_allow_html=True
+
     )
 
     st.sidebar.write(
+
         f"User: {st.session_state.username}"
+
     )
 
     if st.sidebar.button("Log out"):
+
         st.session_state.authenticated = False
+
         st.session_state.session_headers = None
+
         st.session_state.username = None
+
         st.session_state.download_complete = False
+
         st.session_state.failed_csv = None
+
         st.session_state.download_results = None
+
         st.session_state.zip_bytes = None
+
         st.session_state.zip_filename = None
+
         st.session_state.final_zip_path = None
+
         st.session_state.final_zip_size = 0
+
         st.session_state.zip_ready = False
+
         st.rerun()
 
+    st.sidebar.divider()
 
-# ============================================================
-# MAIN TITLE
-# ============================================================
+    st.sidebar.subheader("⚙️ Download Settings")
 
-st.title("CommCare Audio Downloader")
-
-st.write(
-    "Upload your Excel/CSV file, authenticate with CommCare, "
-    "then download and rename the audio files automatically."
-)
-
-
-if not st.session_state.authenticated:
-    st.info(
-        "Please enter your CommCare username and API key "
-        "in the sidebar to continue."
-    )
-    st.stop()
-
-
-# ============================================================
-# FILE UPLOAD
-# ============================================================
-
-st.subheader("📁 Upload Audio List")
-
-uploaded_file = st.file_uploader(
-    "Upload Excel or CSV file",
-    type=["xlsx", "xls", "csv"]
-)
-
-if uploaded_file is None:
-    st.info(
-        "Upload a file containing the columns "
-        "`audio_name` and `survey_audio_link`."
-    )
-    st.stop()
-
-
-# ============================================================
-# FAST FILE READING
-# ============================================================
-
-# Streamlit reruns the script frequently. Cache the parsed upload.
-@st.cache_data(show_spinner="Reading uploaded file...")
-def read_uploaded_file(file_bytes, file_name):
-    buffer = io.BytesIO(file_bytes)
-
-    if file_name.lower().endswith(".csv"):
-        return pd.read_csv(buffer)
-
-    return pd.read_excel(buffer)
-
-
-try:
-    file_bytes = uploaded_file.getvalue()
-    df = read_uploaded_file(
-        file_bytes,
-        uploaded_file.name
-    )
-
-except Exception as e:
-    st.error(f"Could not read the file: {e}")
-    st.stop()
-
-
-# ============================================================
-# CHECK REQUIRED COLUMNS
-# ============================================================
-
-required_columns = [
-    "audio_name",
-    "survey_audio_link"
-]
-
-# Strip whitespace from headers only once
-df.columns = [
-    str(col).strip()
-    for col in df.columns
-]
-
-missing_columns = [
-    col
-    for col in required_columns
-    if col not in df.columns
-]
-
-if missing_columns:
-    st.error(
-        "Missing required columns: "
-        + ", ".join(missing_columns)
-    )
-
-    st.write("Columns found in your file:")
-    st.write(list(df.columns))
-    st.stop()
-
-
-# ============================================================
-# CLEAN DATA
-# ============================================================
-
-df = df[required_columns].copy()
-
-df["audio_name"] = (
-    df["audio_name"]
-    .fillna("")
-    .astype(str)
-    .str.strip()
-)
-
-df["survey_audio_link"] = (
-    df["survey_audio_link"]
-    .fillna("")
-    .astype(str)
-    .str.strip()
-)
-
-df = df[
-    (df["audio_name"] != "") &
-    (df["survey_audio_link"] != "")
-].reset_index(drop=True)
-
-
-# ============================================================
-# CREATE FILENAMES
-# ============================================================
-
-df["filename"] = create_filename_map(df)
-
-
-# ============================================================
-# EXISTING FILES
-# ============================================================
-
-# Build this set ONCE for this Streamlit run.
-existing_files = get_existing_files()
-
-df["already_downloaded"] = df["filename"].isin(
-    existing_files
-)
-
-already_count = int(
-    df["already_downloaded"].sum()
-)
-
-remaining_count = len(df) - already_count
-
-
-# ============================================================
-# PREVIEW
-# ============================================================
-
-st.subheader("Audio Files Preview")
-
-st.write(
-    f"**{len(df):,} audio files** found in your upload."
-)
-
-preview_columns = [
-    "audio_name",
-    "filename",
-    "already_downloaded"
-]
-
-st.dataframe(
-    df[preview_columns],
-    use_container_width=True,
-    height=300
-)
-
-preview_col1, preview_col2 = st.columns(2)
-
-with preview_col1:
-    st.metric(
-        "Already downloaded",
-        already_count
-    )
-
-with preview_col2:
-    st.metric(
-        "Remaining",
-        remaining_count
-    )
-
-
-# ============================================================
-# DOWNLOAD SETTINGS
-# ============================================================
-
-st.subheader("Download Settings")
-
-col1, col2 = st.columns(2)
-
-with col1:
-    workers = st.number_input(
-        "Number of simultaneous downloads",
-        min_value=1,
-        max_value=20,
-        value=3,
-        step=1,
-        help="3 is a good starting point. Increase carefully if CommCare/network allows it."
-    )
-
-with col2:
-    timeout = st.number_input(
+    timeout = st.sidebar.number_input(
         "Timeout per file (seconds)",
         min_value=10,
-        max_value=300,
-        value=100,
-        step=10
+        max_value=600,
+        value=60,
+        step=10,
+        help="Maximum time allowed for each audio file."
     )
 
-st.caption(
-    "Higher simultaneous downloads can be faster, but too many workers "
-    "may overload the connection or trigger server rate limits."
-)
+    retries = st.sidebar.number_input(
+        "Retries per file",
+        min_value=1,
+        max_value=10,
+        value=3,
+        step=1,
+        help="Number of retry attempts when a download fails."
+    )
 
+    workers = st.sidebar.number_input(
+        "Parallel downloads",
+        min_value=1,
+        max_value=10,
+        value=3,
+        step=1,
+        help="Number of audio files downloaded at the same time."
+    )
 
-# ============================================================
-# DOWNLOAD BUTTON
-# ============================================================
+    st.sidebar.divider()
 
-start_download = st.button(
-    "⬇ Download",
-    type="primary"
-)
-
-
-# ============================================================
-# START DOWNLOAD
-# ============================================================
-
-if start_download:
-
-    st.session_state.download_complete = False
-    st.session_state.failed_csv = None
-    st.session_state.download_results = None
-
-    # Use the already-created in-memory set.
-    pending_df = df[
-        ~df["filename"].isin(existing_files)
-    ].copy()
-
-    total_requested = len(df)
-    skipped_count = total_requested - len(pending_df)
-
-    successful_count = 0
-    failed_count = 0
-    failed_files = []
-    manifest_rows = []
-
-    if pending_df.empty:
+    if st.session_state.completed_files:
 
         st.success(
-            "✅ All files in this list are already downloaded."
+
+            f"✅ {len(st.session_state.completed_files)} "
+
+            "completed files retained."
+
         )
 
-        st.session_state.download_results = {
-            "total": total_requested,
-            "downloaded": 0,
-            "skipped": skipped_count,
-            "failed": 0,
-        }
+    if st.session_state.failed_downloads:
 
-        st.session_state.download_complete = True
+        st.warning(
 
-    else:
+            f"⚠️ {len(st.session_state.failed_downloads)} "
+
+            "failed downloads."
+
+        )
+
+    if st.sidebar.button(
+
+        "🗑️ Clear Previous Downloads",
+
+        use_container_width=True
+
+    ):
+
+        st.session_state.completed_files = {}
+
+        st.session_state.failed_downloads = []
+
+        st.session_state.download_started = False
+
+        st.session_state.processed_count = 0
+
+        st.session_state.total_audio_count = 0
+
+        st.rerun()
+
+# ============================================================
+
+# Use persisted credentials after authentication.
+username = st.session_state.username
+api_key = st.session_state.api_key
+commcare_domain = st.session_state.commcare_domain
+
+
+# UPLOAD FILE
+
+# ============================================================
+
+st.header("Upload Audio List")
+
+uploaded_file = st.file_uploader(
+
+    "Upload Excel or CSV file",
+
+    type=["xlsx", "xls", "csv"],
+
+    help=(
+
+        "The first four columns should be: "
+
+        "audio name, link 1, link 2, link 3."
+
+    )
+
+)
+
+# ============================================================
+
+# SHOW DATA
+
+# ============================================================
+
+df = None
+
+if uploaded_file:
+
+    try:
+
+        df = load_uploaded_file(
+
+            uploaded_file
+
+        )
+
+        st.success(
+
+            f"File loaded successfully: "
+
+            f"**{uploaded_file.name}**"
+
+        )
+
+        st.subheader("Uploaded Data")
+
+        st.dataframe(
+
+            df,
+
+            use_container_width=True,
+
+            height=300
+
+        )
 
         st.info(
-            f"Downloading {len(pending_df):,} remaining files. "
-            f"{skipped_count:,} files will be skipped."
+
+            "The first four columns are interpreted as: "
+
+            "**audio_name, survey_link1, link2, link3**."
+
         )
 
+        # ----------------------------------------------------
+
+        # CHECK REQUIRED COLUMN
+
+        # ----------------------------------------------------
+
+        if AUDIO_NAME_COLUMN not in df.columns:
+
+            st.error(
+
+                "The first column could not be identified as "
+
+                "`audio_name`."
+
+            )
+
+            st.stop()
+
+        # ----------------------------------------------------
+
+        # COUNT LINKS
+
+        # ----------------------------------------------------
+
+        total_links = count_audio_links(df)
+
+        st.metric(
+
+            "Total audio links",
+
+            total_links
+
+        )
+
+        # ----------------------------------------------------
+
+        # BUILD TASKS
+
+        # ----------------------------------------------------
+
+        tasks = build_audio_tasks(df)
+
+        if not tasks:
+
+            st.warning(
+
+                "No valid audio links were found."
+
+            )
+
+        else:
+
+            st.subheader("Summary")
+
+            summary_col1, summary_col2, summary_col3 = st.columns(3)
+
+            with summary_col1:
+
+                st.metric(
+
+                    "Rows",
+
+                    len(df)
+
+                )
+
+            with summary_col2:
+
+                st.metric(
+
+                    "Audio files",
+
+                    len(tasks)
+
+                )
+
+            with summary_col3:
+
+                st.metric(
+
+                    "Names",
+
+                    df[AUDIO_NAME_COLUMN]
+
+                    .dropna()
+
+                    .nunique()
+
+                )
+
+    except Exception as e:
+
+        st.error(
+
+            f"Could not read the uploaded file: {e}"
+
+        )
+
+        st.stop()
+
+# ============================================================
+
+# DOWNLOAD SECTION
+
+# ============================================================
+
+if df is not None and tasks:
+
+    st.header("Download Audio")
+
+    st.write(
+
+        """
+
+        Each row can contain up to **three audio links**.
+
+        The downloader will download every available link.
+
+        """
+
+    )
+
+    # --------------------------------------------------------
+
+    # EXAMPLE
+
+    # --------------------------------------------------------
+
+    with st.expander("📌 How the files will be renamed"):
+
+        st.code(
+
+            """
+
+audio_name = household_001
+
+survey_link1 -> household_001_1.m4a
+
+link2        -> household_001_2.m4a
+
+link3        -> household_001_3.m4a
+
+audio_name = household_002
+
+survey_link1 -> household_002_1.m4a
+
+link2        -> household_002_2.m4a
+
+link3        -> missing -> skipped
+
+            """
+
+        )
+
+    # --------------------------------------------------------
+
+    # START DOWNLOAD
+
+    # --------------------------------------------------------
+
+    start_download = st.button(
+
+        "Start Download",
+
+        type="primary",
+
+        use_container_width=True
+
+    )
+
+    if start_download:
+
+        if not username.strip():
+
+            st.error(
+
+                "Please enter your CommCare username."
+
+            )
+
+            st.stop()
+
+        if not api_key.strip():
+
+            st.error(
+
+                "Please enter your CommCare API key."
+
+            )
+
+            st.stop()
+
+        if not commcare_domain.strip():
+
+            st.error(
+
+                "Please enter your CommCare domain."
+
+            )
+
+            st.stop()
+
+        # ----------------------------------------------------
+
+        # RESET CURRENT FAILED LIST
+
+        # ----------------------------------------------------
+
+        st.session_state.failed_downloads = []
+
+        st.session_state.download_started = True
+
+        st.session_state.processed_count = 0
+
+        st.session_state.total_audio_count = len(tasks)
+
+        # ----------------------------------------------------
+
+        # PROGRESS
+
+        # ----------------------------------------------------
+
         progress_bar = st.progress(0)
+
         status_text = st.empty()
 
-        headers = st.session_state.session_headers
-        total_pending = len(pending_df)
-        completed = 0
+        success_text = st.empty()
 
-        # Convert to tuples once instead of repeatedly using iterrows()
-        download_tasks = [
-            (
-                row.audio_name,
-                row.survey_audio_link,
-                row.filename
-            )
-            for row in pending_df.itertuples(index=False)
-        ]
+        failed_text = st.empty()
+
+        # ----------------------------------------------------
+
+        # DOWNLOAD IN PARALLEL
+
+        # ----------------------------------------------------
+
+        completed_this_run = 0
+
+        failed_this_run = 0
 
         with ThreadPoolExecutor(
+
             max_workers=int(workers)
+
         ) as executor:
 
-            futures = {
-                executor.submit(
+            future_to_task = {}
+
+            for task in tasks:
+
+                future = executor.submit(
+
                     download_audio,
-                    headers,
-                    url,
-                    filename,
-                    audio_name,
+
+                    task,
+
+                    username.strip(),
+
+                    api_key.strip(),
+
                     int(timeout),
-                    existing_files
-                ): (
-                    audio_name,
-                    url,
-                    filename
+
+                    int(retries)
+
                 )
-                for audio_name, url, filename in download_tasks
-            }
 
-            for future in as_completed(futures):
+                future_to_task[future] = task
 
-                audio_name, url, filename = futures[future]
+            for future in as_completed(
+
+                future_to_task
+
+            ):
+
+                task = future_to_task[future]
 
                 try:
+
                     result = future.result()
 
                 except Exception as e:
+
                     result = {
+
                         "success": False,
-                        "skipped": False,
-                        "filename": filename,
-                        "audio_name": audio_name,
-                        "url": url,
-                        "error": str(e),
-                        "size_bytes": 0,
+
+                        "filename": task["filename"],
+
+                        "content": None,
+
+                        "error": str(e)
+
                     }
 
-                completed += 1
+                # --------------------------------------------
 
-                progress_bar.progress(
-                    completed / total_pending
-                )
+                # SUCCESS
+
+                # --------------------------------------------
 
                 if result["success"]:
 
-                    successful_count += 1
+                    filename = result["filename"]
 
-                    manifest_rows.append(
-                        make_manifest_row(
-                            filename=result["filename"],
-                            audio_name=result["audio_name"],
-                            url=result["url"],
-                            status="downloaded",
-                            size_bytes=result["size_bytes"]
-                        )
+                    # Make filename unique if necessary
+
+                    filename = make_unique_filename(
+
+                        filename,
+
+                        st.session_state.completed_files
+
                     )
 
-                    status_text.write(
-                        f"✅ {completed:,}/{total_pending:,} "
-                        f"completed — {result['filename']}"
-                    )
+                    st.session_state.completed_files[
+
+                        filename
+
+                    ] = result["content"]
+
+                    completed_this_run += 1
+
+                # --------------------------------------------
+
+                # FAILURE
+
+                # --------------------------------------------
 
                 else:
 
-                    failed_count += 1
+                    failed_this_run += 1
 
-                    failed_files.append({
-                        "audio_name": audio_name,
-                        "survey_audio_link": url,
-                        "filename": filename,
-                        "error": result["error"],
-                    })
+                    st.session_state.failed_downloads.append(
 
-                    manifest_rows.append(
-                        make_manifest_row(
-                            filename=filename,
-                            audio_name=audio_name,
-                            url=url,
-                            status="failed",
-                            size_bytes=0,
-                            error=result["error"]
-                        )
+                        {
+
+                            "row_number": task["row_number"],
+
+                            "audio_name": task["audio_name"],
+
+                            "link_column": task["link_column"],
+
+                            "url": task["url"],
+
+                            "filename": task["filename"],
+
+                            "error": result["error"]
+
+                        }
+
                     )
 
-                    status_text.write(
-                        f"❌ {completed:,}/{total_pending:,} "
-                        f"failed — {filename}"
+                # --------------------------------------------
+
+                # UPDATE PROGRESS
+
+                # --------------------------------------------
+
+                st.session_state.processed_count += 1
+
+                processed = (
+
+                    st.session_state.processed_count
+
+                )
+
+                total = (
+
+                    st.session_state.total_audio_count
+
+                )
+
+                progress = (
+
+                    processed / total
+
+                    if total > 0
+
+                    else 0
+
+                )
+
+                progress_bar.progress(
+
+                    min(progress, 1.0)
+
+                )
+
+                status_text.info(
+
+                    f"Processing {processed} "
+
+                    f"of {total} audio files..."
+
+                )
+
+                success_text.success(
+
+                    f"✅ Completed: "
+
+                    f"{len(st.session_state.completed_files)}"
+
+                )
+
+                if st.session_state.failed_downloads:
+
+                    failed_text.warning(
+
+                        f"⚠️ Failed: "
+
+                        f"{len(st.session_state.failed_downloads)}"
+
                     )
 
-        # IMPORTANT PERFORMANCE CHANGE:
-        # Write the manifest once instead of once per audio file.
-        append_manifest_rows(manifest_rows)
+        # ----------------------------------------------------
 
-        progress_bar.progress(1.0)
+        # FINAL RESULT
 
-        st.session_state.download_results = {
-            "total": total_requested,
-            "downloaded": successful_count,
-            "skipped": skipped_count,
-            "failed": failed_count,
-        }
+        # ----------------------------------------------------
 
-        st.session_state.failed_csv = make_failed_csv(
-            failed_files
+        st.success(
+
+            "🎉 Download process finished."
+
         )
 
-        st.session_state.download_complete = True
-
-        if failed_count == 0:
-            status_text.success(
-                "✅ Download completed successfully!"
-            )
-        else:
-            status_text.warning(
-                f"⚠️ Finished with {failed_count} failed file(s). "
-                "Click download again to retry the failed files."
-            )
-
-
-# ============================================================
-# RESULTS
-# ============================================================
-
-if st.session_state.download_complete:
-
-    results = st.session_state.download_results
-
-    if results:
-
-        st.subheader("Download Results")
-
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3 = st.columns(3)
 
         with col1:
-            st.metric("Total Files", results["total"])
+
+            st.metric(
+
+                "✅ Completed",
+
+                len(st.session_state.completed_files)
+
+            )
 
         with col2:
+
             st.metric(
-                "Newly Downloaded",
-                results["downloaded"]
+
+                "❌ Failed",
+
+                len(st.session_state.failed_downloads)
+
             )
 
         with col3:
+
             st.metric(
-                "Already Saved",
-                results["skipped"]
+
+                "ZIP files",
+
+                len(st.session_state.completed_files)
+
             )
 
-        with col4:
-            st.metric(
-                "Failed",
-                results["failed"]
-            )
-
-
-# FINAL ZIP + CLEANUP
 # ============================================================
 
-st.divider()
-st.subheader("Final ZIP")
+# COMPLETED FILES / ZIP
 
-completed_files = get_completed_files()
+# ============================================================
 
-if completed_files:
+if st.session_state.completed_files:
 
-    current_pending = df[
-        ~df["filename"].isin(set(completed_files))
-    ]
+    st.header("Download Completed Files")
 
-    all_current_files_complete = (
-        len(df) > 0 and current_pending.empty
+    st.success(
+
+        f"""
+
+        You currently have
+
+        **{len(st.session_state.completed_files)}**
+
+        successfully downloaded audio files.
+
+        These files are retained in the app session even if
+
+        another download fails.
+
+        """
+
     )
 
-    if all_current_files_complete:
+    # --------------------------------------------------------
 
-        st.success(
-            f"All {len(df):,} files in the current upload are downloaded."
+    # CREATE ZIP
+
+    # --------------------------------------------------------
+
+    zip_data = create_zip_from_completed_files()
+
+    if zip_data:
+
+        st.download_button(
+
+            label=(
+
+                f"⬇ Download ZIP "
+
+                f"({len(st.session_state.completed_files)} files)"
+
+            ),
+
+            data=zip_data,
+
+            file_name="commcare_completed_audio.zip",
+
+            mime="application/zip",
+
+            use_container_width=True
+
         )
 
-        # ----------------------------------------------------
-        # CREATE THE ZIP AUTOMATICALLY BEFORE SHOWING DOWNLOAD
-        #
-        # This is the important fix:
-        # The ZIP is created during the Streamlit run, BEFORE
-        # the Download button is displayed. Therefore the user
-        # only needs to click the actual Download button.
-        # No refresh and no second ZIP-creation click are needed.
-        # ----------------------------------------------------
+    # --------------------------------------------------------
 
-        final_zip_path = st.session_state.get("final_zip_path")
+    # SHOW FILE LIST
 
-        zip_is_available = (
-            st.session_state.get("final_zip_ready", False)
-            and final_zip_path
-            and os.path.exists(final_zip_path)
-            and os.path.getsize(final_zip_path) > 0
+    # --------------------------------------------------------
+
+    with st.expander("View completed files"):
+
+        completed_df = pd.DataFrame(
+
+            {
+
+                "File name": list(
+
+                    st.session_state.completed_files.keys()
+
+                )
+
+            }
+
         )
 
-        if not zip_is_available:
+        st.dataframe(
 
-            try:
+            completed_df,
 
-                start_time = time.time()
+            use_container_width=True,
 
-                with st.spinner(
-                    f"Preparing ZIP from "
-                    f"{len(completed_files):,} audio files..."
-                ):
+            hide_index=True
 
-                    zip_path, zip_size = create_final_zip_file()
-
-                elapsed = time.time() - start_time
-
-                st.session_state.final_zip_path = zip_path
-                st.session_state.final_zip_size = zip_size
-                st.session_state.zip_filename = (
-                    "commcare_audio_files_final.zip"
-                )
-                st.session_state.zip_ready = True
-                st.session_state.final_zip_ready = True
-
-                final_zip_path = zip_path
-
-                st.success(
-                    f"ZIP ready ({zip_size / (1024 * 1024):.1f} MB) "
-                    f"— created in {elapsed:.1f} seconds."
-                )
-
-            except Exception as e:
-
-                st.session_state.final_zip_path = None
-                st.session_state.final_zip_size = 0
-                st.session_state.zip_ready = False
-                st.session_state.final_zip_ready = False
-
-                st.error(
-                    f"Could not create the Final ZIP: {e}"
-                )
-
-        # ----------------------------------------------------
-        # NATIVE STREAMLIT DOWNLOAD BUTTON
-        #
-        # The ZIP already exists before this button is rendered.
-        # Clicking this button immediately starts the download.
-        # ----------------------------------------------------
-
-        final_zip_path = st.session_state.get("final_zip_path")
-
-        if (
-            st.session_state.get("final_zip_ready", False)
-            and final_zip_path
-            and os.path.exists(final_zip_path)
-            and os.path.getsize(final_zip_path) > 0
-        ):
-
-            try:
-
-                zip_size_mb = (
-                    os.path.getsize(final_zip_path)
-                    / (1024 * 1024)
-                )
-
-                with open(final_zip_path, "rb") as zip_file:
-                    zip_data = zip_file.read()
-
-                st.download_button(
-                    label="⬇ Download Final ZIP",
-                    data=zip_data,
-                    file_name="commcare_audio_files_final.zip",
-                    mime="application/zip",
-                    key="final_zip_download",
-                    type="primary"
-                )
-
-                st.caption(
-                    f"Final ZIP size: {zip_size_mb:.1f} MB"
-                )
-
-            except OSError as e:
-
-                st.error(
-                    f"The Final ZIP could not be opened for download: {e}"
-                )
-
-        # ----------------------------------------------------
-        # CLEAR SERVER AUDIO FILES
-        # ----------------------------------------------------
-
-        if st.session_state.get("final_zip_ready", False):
-
-            if st.button(
-                "🗑️ Clear Server Audio Files",
-                key="clear_server_audio"
-            ):
-
-                deleted_count, cleanup_errors = (
-                    delete_saved_audio(reset_manifest=True)
-                )
-
-                st.session_state.zip_bytes = None
-                st.session_state.zip_filename = None
-                st.session_state.final_zip_path = None
-                st.session_state.final_zip_size = 0
-                st.session_state.zip_ready = False
-                st.session_state.final_zip_ready = False
-                st.session_state.failed_csv = None
-                st.session_state.download_complete = False
-                st.session_state.download_results = None
-
-                if cleanup_errors:
-
-                    st.warning(
-                        f"{deleted_count} file(s) removed, "
-                        f"but some files could not be deleted: "
-                        + "; ".join(cleanup_errors)
-                    )
-
-                else:
-
-                    st.success(
-                        f"{deleted_count} server file(s) cleared."
-                    )
-
-                st.rerun()
-
-    else:
-
-        st.info(
-            f"{len(current_pending):,} file(s) from the current upload "
-            f"are still missing. The Final ZIP will be available after "
-            f"all files have been downloaded."
         )
-
-else:
-
-    st.info("No completed audio files are currently saved.")
-
 
 # ============================================================
-# FAILED FILES
+
+# FAILED DOWNLOADS
+
 # ============================================================
 
-if st.session_state.failed_csv is not None:
+if st.session_state.failed_downloads:
 
-    st.subheader("⚠️ Failed Downloads")
+    st.header("Failed Downloads")
 
-    st.download_button(
-        label="⬇ Download Failed CSV",
-        data=st.session_state.failed_csv,
-        file_name="failed_audio_files.csv",
-        mime="text/csv",
-        key="failed_csv_download"
+    st.warning(
+
+        f"""
+
+        {len(st.session_state.failed_downloads)}
+
+        audio file(s) could not be downloaded.
+
+        Your successfully downloaded files have NOT been lost.
+
+        """
+
     )
 
-    st.info(
-        "Run the downloader again to retry failed files. "
-        "Successfully downloaded files will be skipped."
+    failed_df = pd.DataFrame(
+
+        st.session_state.failed_downloads
+
     )
 
+    st.dataframe(
+
+        failed_df,
+
+        use_container_width=True,
+
+        hide_index=True
+
+    )
+
+    # --------------------------------------------------------
+
+    # FAILED CSV
+
+    # --------------------------------------------------------
+
+    failed_csv = create_failed_csv()
+
+    if failed_csv:
+
+        st.download_button(
+
+            label="⬇ Download Failed CSV",
+
+            data=failed_csv,
+
+            file_name="commcare_failed_downloads.csv",
+
+            mime="text/csv",
+
+            use_container_width=True
+
+        )
 
 # ============================================================
-# INFORMATION
+
+# INSTRUCTIONS
+
+# ============================================================
+
+# ============================================================
+
+# FOOTER
+
 # ============================================================
 
 st.divider()
 
 st.caption(
-    f"Persistent download folder: {os.path.abspath(DOWNLOAD_DIR)}"
+
+    "CommCare Audio Downloader — "
+
+    "Download, rename and package CommCare recordings."
+
 )
