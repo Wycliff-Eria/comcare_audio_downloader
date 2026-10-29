@@ -296,11 +296,16 @@ SESSION_DEFAULTS = {
     "download_started": False,
     "processed_count": 0,
     "total_audio_count": 0,
+    "workspace_dir": None,
 }
 
 for _key, _default in SESSION_DEFAULTS.items():
     if _key not in st.session_state:
         st.session_state[_key] = _default
+
+# Store downloaded audio on disk instead of keeping every recording in RAM.
+if not st.session_state.workspace_dir or not os.path.isdir(st.session_state.workspace_dir):
+    st.session_state.workspace_dir = tempfile.mkdtemp(prefix="commcare_audio_session_")
 
 if "final_zip_path" not in st.session_state:
     st.session_state["final_zip_path"] = None
@@ -626,250 +631,84 @@ def build_audio_tasks(df):
 # ============================================================
 
 def download_audio(
-
     task,
-
     username,
-
     api_key,
-
     timeout,
-
-    retries
-
+    retries,
+    workspace_dir,
 ):
-
-    """
-
-    Download one CommCare audio file.
-
-    Returns:
-
-        {
-
-            success: True/False,
-
-            filename: ...,
-
-            content: bytes,
-
-            error: ...
-
-        }
-
-    """
-
+    """Stream one audio file directly to disk to avoid high RAM use."""
     url = task["url"]
-
     filename = task["filename"]
-
     headers = {
-
         "Authorization": f"ApiKey {username}:{api_key}",
-
-        "User-Agent": USER_AGENT
-
+        "User-Agent": USER_AGENT,
     }
-
     last_error = "Unknown error"
 
     for attempt in range(1, retries + 1):
-
+        temp_path = None
+        response = None
         try:
-
             response = requests.get(
-
-                url,
-
-                headers=headers,
-
-                stream=True,
-
-                timeout=timeout
-
+                url, headers=headers, stream=True, timeout=timeout
             )
-
-            # ------------------------------------------------
-
-            # AUTHENTICATION ERROR
-
-            # ------------------------------------------------
 
             if response.status_code == 401:
-
-                return {
-
-                    "success": False,
-
-                    "filename": filename,
-
-                    "content": None,
-
-                    "error": "401 Unauthorized - check CommCare username/API key."
-
-                }
-
+                return {"success": False, "filename": filename, "path": None,
+                        "error": "401 Unauthorized - check CommCare username/API key."}
             if response.status_code == 403:
-
-                return {
-
-                    "success": False,
-
-                    "filename": filename,
-
-                    "content": None,
-
-                    "error": "403 Forbidden - API key may not have access to this recording."
-
-                }
-
-            # ------------------------------------------------
-
-            # SUCCESS
-
-            # ------------------------------------------------
+                return {"success": False, "filename": filename, "path": None,
+                        "error": "403 Forbidden - API key may not have access to this recording."}
 
             if response.status_code == 200:
-
-                file_buffer = io.BytesIO()
-
-                for chunk in response.iter_content(
-
-                    chunk_size=CHUNK_SIZE
-
-                ):
-
-                    if chunk:
-
-                        file_buffer.write(chunk)
-
+                suffix = os.path.splitext(filename)[1] or ".audio"
+                fd, temp_path = tempfile.mkstemp(
+                    prefix="audio_part_", suffix=suffix, dir=workspace_dir
+                )
+                os.close(fd)
+                with open(temp_path, "wb") as audio_file:
+                    for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
+                        if chunk:
+                            audio_file.write(chunk)
                 response.close()
-
-                return {
-
-                    "success": True,
-
-                    "filename": filename,
-
-                    "content": file_buffer.getvalue(),
-
-                    "error": None
-
-                }
-
-            # ------------------------------------------------
-
-            # RETRYABLE HTTP ERRORS
-
-            # ------------------------------------------------
+                return {"success": True, "filename": filename,
+                        "path": temp_path, "error": None}
 
             if response.status_code in RETRY_STATUS_CODES:
-
-                last_error = (
-
-                    f"HTTP {response.status_code}"
-
-                )
-
-                response.close()
-
+                last_error = f"HTTP {response.status_code}"
                 if attempt < retries:
-
                     time.sleep(min(2 ** attempt, 10))
-
                     continue
-
-                return {
-
-                    "success": False,
-
-                    "filename": filename,
-
-                    "content": None,
-
-                    "error": last_error
-
-                }
-
-            # ------------------------------------------------
-
-            # OTHER HTTP ERRORS
-
-            # ------------------------------------------------
-
-            last_error = (
-
-                f"HTTP {response.status_code}: "
-
-                f"{response.reason}"
-
-            )
-
-            response.close()
-
-            return {
-
-                "success": False,
-
-                "filename": filename,
-
-                "content": None,
-
-                "error": last_error
-
-            }
+            else:
+                last_error = f"HTTP {response.status_code}: {response.reason}"
+            return {"success": False, "filename": filename, "path": None,
+                    "error": last_error}
 
         except requests.exceptions.Timeout:
-
             last_error = "Request timed out."
-
-            if attempt < retries:
-
-                time.sleep(min(2 ** attempt, 10))
-
-                continue
-
         except requests.exceptions.ConnectionError:
-
-            last_error = (
-
-                "Connection interrupted or network unavailable."
-
-            )
-
-            if attempt < retries:
-
-                time.sleep(min(2 ** attempt, 10))
-
-                continue
-
-        except requests.exceptions.RequestException as e:
-
-            last_error = str(e)
-
-            if attempt < retries:
-
-                time.sleep(min(2 ** attempt, 10))
-
-                continue
-
-        except Exception as e:
-
-            last_error = str(e)
-
+            last_error = "Connection interrupted or network unavailable."
+        except requests.exceptions.RequestException as exc:
+            last_error = str(exc)
+        except Exception as exc:
+            last_error = str(exc)
             break
+        finally:
+            if response is not None:
+                response.close()
 
-    return {
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+        if attempt < retries:
+            time.sleep(min(2 ** attempt, 10))
 
-        "success": False,
-
-        "filename": filename,
-
-        "content": None,
-
-        "error": last_error
-
-    }
+    return {"success": False, "filename": filename, "path": None,
+            "error": last_error}
 
 # ============================================================
 
@@ -878,18 +717,22 @@ def download_audio(
 # ============================================================
 
 def create_zip_from_completed_files():
-    """Create the ZIP on disk and reuse it unless completed files change."""
-    completed = st.session_state.completed_files
+    """Build/reuse an uncompressed ZIP by adding disk files, not RAM bytes."""
+    completed = st.session_state.completed_files  # filename -> local path
     if not completed:
         return None
 
-    # This app only adds files under unique names, so names and sizes provide
-    # a lightweight signature for detecting when a new archive is needed.
-    signature = tuple((name, len(content)) for name, content in completed.items())
-    existing_path = st.session_state.get("final_zip_path")
-    existing_signature = st.session_state.get("final_zip_signature")
+    signature_parts = []
+    for name, path in completed.items():
+        if not os.path.isfile(path):
+            continue
+        stat = os.stat(path)
+        signature_parts.append((name, stat.st_size, stat.st_mtime_ns))
+    signature = tuple(signature_parts)
 
-    if existing_path and existing_signature == signature and os.path.isfile(existing_path):
+    existing_path = st.session_state.get("final_zip_path")
+    if (existing_path and st.session_state.get("final_zip_signature") == signature
+            and os.path.isfile(existing_path)):
         return existing_path
 
     if existing_path and os.path.isfile(existing_path):
@@ -898,17 +741,21 @@ def create_zip_from_completed_files():
         except OSError:
             pass
 
-    fd, zip_path = tempfile.mkstemp(prefix="commcare_audio_", suffix=".zip")
+    workspace = st.session_state.workspace_dir
+    fd, zip_path = tempfile.mkstemp(
+        prefix="commcare_audio_", suffix=".zip", dir=workspace
+    )
     os.close(fd)
     try:
         with zipfile.ZipFile(
             zip_path, mode="w", compression=zipfile.ZIP_STORED, allowZip64=True
         ) as zip_file:
-            for filename, content in completed.items():
-                zip_file.writestr(filename, content)
+            for filename, audio_path in completed.items():
+                if os.path.isfile(audio_path):
+                    zip_file.write(audio_path, arcname=filename)
 
-        st.session_state["final_zip_path"] = zip_path
-        st.session_state["final_zip_signature"] = signature
+        st.session_state.final_zip_path = zip_path
+        st.session_state.final_zip_signature = signature
         return zip_path
     except Exception:
         try:
@@ -1214,6 +1061,13 @@ else:
                 pass
         st.session_state["final_zip_path"] = None
         st.session_state["final_zip_signature"] = None
+        # Remove previously downloaded audio files from this session workspace.
+        for old_path in list(st.session_state.completed_files.values()):
+            try:
+                if os.path.isfile(old_path):
+                    os.remove(old_path)
+            except OSError:
+                pass
         st.session_state.completed_files = {}
 
         st.session_state.failed_downloads = []
@@ -1298,7 +1152,7 @@ if uploaded_file:
 
             "The first four columns are interpreted as: "
 
-            "**audio_name, survey_link1, link2, link3**."
+            "**audio_name, audio_link1, audio_link2, audio_link3**."
 
         )
 
@@ -1540,8 +1394,8 @@ if df is not None and tasks:
 
                     int(timeout),
 
-                    int(retries)
-
+                    int(retries),
+                    st.session_state.workspace_dir,
                 )
 
                 future_to_task[future] = task
@@ -1592,11 +1446,11 @@ if df is not None and tasks:
 
                     )
 
-                    st.session_state.completed_files[
-
-                        filename
-
-                    ] = result["content"]
+                    # Move the completed temporary download to its final unique name.
+                    final_path = os.path.join(st.session_state.workspace_dir, filename)
+                    if os.path.abspath(result["path"]) != os.path.abspath(final_path):
+                        os.replace(result["path"], final_path)
+                    st.session_state.completed_files[filename] = final_path
 
                     completed_this_run += 1
 
@@ -1730,7 +1584,7 @@ if df is not None and tasks:
 
             st.metric(
 
-                "ZIP files",
+                "Audio files saved",
 
                 len(st.session_state.completed_files)
 
@@ -1775,18 +1629,22 @@ if st.session_state.completed_files:
         zip_size_mb = os.path.getsize(zip_path) / (1024 * 1024)
         st.caption(f"ZIP size: {zip_size_mb:.1f} MB")
         # The archive is reused on reruns instead of being rebuilt on every click.
+        # Streamlit needs downloadable data in memory, but the archive is built
+        # from disk files; the individual recordings are never all held in RAM.
         with open(zip_path, "rb") as zip_file:
-            st.download_button(
-                label=(
-                    f"⬇ Download ZIP "
-                    f"({len(st.session_state.completed_files)} files)"
-                ),
-                data=zip_file,
-                file_name="commcare_completed_audio.zip",
-                mime="application/zip",
-                use_container_width=True,
-                key="download_final_audio_zip"
-            )
+            zip_data = zip_file.read()
+
+        st.download_button(
+            label=(
+                f"⬇ Download ZIP "
+                f"({len(st.session_state.completed_files)} files)"
+            ),
+            data=zip_data,
+            file_name="commcare_completed_audio.zip",
+            mime="application/zip",
+            use_container_width=True,
+            key="download_final_audio_zip"
+        )
 
 
 
