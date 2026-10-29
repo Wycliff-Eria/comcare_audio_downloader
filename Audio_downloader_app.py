@@ -11,6 +11,7 @@ import zipfile
 import re
 
 import os
+import tempfile
 
 import time
 
@@ -301,6 +302,10 @@ for _key, _default in SESSION_DEFAULTS.items():
     if _key not in st.session_state:
         st.session_state[_key] = _default
 
+if "final_zip_path" not in st.session_state:
+    st.session_state["final_zip_path"] = None
+if "final_zip_signature" not in st.session_state:
+    st.session_state["final_zip_signature"] = None
 
 # HELPER FUNCTIONS
 
@@ -873,52 +878,45 @@ def download_audio(
 # ============================================================
 
 def create_zip_from_completed_files():
-
-    """
-
-    Create a ZIP containing all successfully downloaded files.
-
-    """
-
-    if not st.session_state.completed_files:
-
+    """Create the ZIP on disk and reuse it unless completed files change."""
+    completed = st.session_state.completed_files
+    if not completed:
         return None
 
-    zip_buffer = io.BytesIO()
+    # This app only adds files under unique names, so names and sizes provide
+    # a lightweight signature for detecting when a new archive is needed.
+    signature = tuple((name, len(content)) for name, content in completed.items())
+    existing_path = st.session_state.get("final_zip_path")
+    existing_signature = st.session_state.get("final_zip_signature")
 
-    with zipfile.ZipFile(
+    if existing_path and existing_signature == signature and os.path.isfile(existing_path):
+        return existing_path
 
-        zip_buffer,
+    if existing_path and os.path.isfile(existing_path):
+        try:
+            os.remove(existing_path)
+        except OSError:
+            pass
 
-        mode="w",
+    fd, zip_path = tempfile.mkstemp(prefix="commcare_audio_", suffix=".zip")
+    os.close(fd)
+    try:
+        with zipfile.ZipFile(
+            zip_path, mode="w", compression=zipfile.ZIP_STORED, allowZip64=True
+        ) as zip_file:
+            for filename, content in completed.items():
+                zip_file.writestr(filename, content)
 
-        compression=zipfile.ZIP_STORED
+        st.session_state["final_zip_path"] = zip_path
+        st.session_state["final_zip_signature"] = signature
+        return zip_path
+    except Exception:
+        try:
+            os.remove(zip_path)
+        except OSError:
+            pass
+        raise
 
-    ) as zip_file:
-
-        for filename, content in (
-
-            st.session_state.completed_files.items()
-
-        ):
-
-            zip_file.writestr(
-
-                filename,
-
-                content
-
-            )
-
-    zip_buffer.seek(0)
-
-    return zip_buffer.getvalue()
-
-# ============================================================
-
-# FAILED CSV
-
-# ============================================================
 
 def create_failed_csv():
 
@@ -1208,6 +1206,14 @@ else:
 
     ):
 
+        old_zip_path = st.session_state.get("final_zip_path")
+        if old_zip_path and os.path.isfile(old_zip_path):
+            try:
+                os.remove(old_zip_path)
+            except OSError:
+                pass
+        st.session_state["final_zip_path"] = None
+        st.session_state["final_zip_signature"] = None
         st.session_state.completed_files = {}
 
         st.session_state.failed_downloads = []
@@ -1764,29 +1770,25 @@ if st.session_state.completed_files:
 
     # --------------------------------------------------------
 
-    zip_data = create_zip_from_completed_files()
+    zip_path = create_zip_from_completed_files()
+    if zip_path and os.path.isfile(zip_path):
+        zip_size_mb = os.path.getsize(zip_path) / (1024 * 1024)
+        st.caption(f"ZIP size: {zip_size_mb:.1f} MB")
+        # The archive is reused on reruns instead of being rebuilt on every click.
+        with open(zip_path, "rb") as zip_file:
+            st.download_button(
+                label=(
+                    f"⬇ Download ZIP "
+                    f"({len(st.session_state.completed_files)} files)"
+                ),
+                data=zip_file,
+                file_name="commcare_completed_audio.zip",
+                mime="application/zip",
+                use_container_width=True,
+                key="download_final_audio_zip"
+            )
 
-    if zip_data:
 
-        st.download_button(
-
-            label=(
-
-                f"⬇ Download ZIP "
-
-                f"({len(st.session_state.completed_files)} files)"
-
-            ),
-
-            data=zip_data,
-
-            file_name="commcare_completed_audio.zip",
-
-            mime="application/zip",
-
-            use_container_width=True
-
-        )
 
     # --------------------------------------------------------
 
